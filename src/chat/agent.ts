@@ -38,6 +38,11 @@ const RETRY_MAX = Number(process.env.CHAT_RETRY_MAX ?? 2);
 const FALLBACK_MODEL = process.env.CHAT_FALLBACK_MODEL ?? "qwen2.5:3b";
 const MODEL_CALLS_PER_RUN = Number(process.env.CHAT_MODEL_CALL_LIMIT ?? 5);
 
+// Max wall-clock per turn. Generous because CPU inference is slow — this mainly
+// guards against true hangs (Ollama wedged, network dead), not slow-but-working
+// turns. Aborting the turn also cancels the underlying Ollama request.
+const TURN_TIMEOUT_MS = Number(process.env.CHAT_TURN_TIMEOUT_MS ?? 120000);
+
 // Trim history right before each model call (only the request, not stored state).
 const trimHistory = createMiddleware({
   name: "TrimHistory",
@@ -248,19 +253,55 @@ async function getPendingInterrupt(
   return null;
 }
 
+/**
+ * Wrap an async iterable so it throws as soon as `signal` aborts — racing each
+ * step against the abort. This enforces the timeout / cancellation from our side
+ * even if the model doesn't honor the AbortSignal (we still pass the signal to
+ * the model for best-effort cancellation, and call iter.return() to stop it).
+ */
+async function* withAbortSignal<T>(
+  iterable: AsyncIterable<T>,
+  signal: AbortSignal,
+): AsyncGenerator<T> {
+  const iter = iterable[Symbol.asyncIterator]();
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error("aborted"));
+  });
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (signal.aborted) throw signal.reason ?? new Error("aborted");
+    for (;;) {
+      const result = await Promise.race([iter.next(), aborted]);
+      if (result.done) return;
+      yield result.value;
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    await iter.return?.(); // best-effort: stop the underlying stream
+  }
+}
+
 /** Run the agent (a fresh turn or a resume), yielding token + interrupt events. */
 async function* runAgentStream(
   threadId: string,
   input: Parameters<ChatAgent["stream"]>[0],
+  signal?: AbortSignal,
 ): AsyncGenerator<ChatEvent> {
   const agent = await buildChatAgent();
   const config = { configurable: { thread_id: threadId } };
 
+  // Use the caller's signal (server: turn timeout + client disconnect) or, if
+  // none (e.g. the CLI), a standalone per-turn timeout. Passing it to
+  // agent.stream also cancels the underlying Ollama request on abort.
+  const turnSignal = signal ?? AbortSignal.timeout(TURN_TIMEOUT_MS);
+
   const stream = await agent.stream(input, {
     ...config,
     streamMode: "messages",
+    signal: turnSignal,
   });
-  for await (const part of stream) {
+  for await (const part of withAbortSignal(stream, turnSignal)) {
     const chunk = Array.isArray(part) ? part[0] : part;
     if (AIMessageChunk.isInstance(chunk) && typeof chunk.content === "string" && chunk.content) {
       yield { type: "token", value: chunk.content };
@@ -283,9 +324,14 @@ export async function* streamChat(
   userId: string,
   threadId: string,
   question: string,
+  signal?: AbortSignal,
 ): AsyncGenerator<ChatEvent> {
   await authorizeOrCreate(threadId, userId, question.slice(0, 60));
-  yield* runAgentStream(threadId, { messages: [new HumanMessage(question)] });
+  yield* runAgentStream(
+    threadId,
+    { messages: [new HumanMessage(question)] },
+    signal,
+  );
 }
 
 /** Resume an interrupted run with an approve/reject decision; streams events. */
@@ -293,6 +339,7 @@ export async function* resumeChat(
   userId: string,
   threadId: string,
   decision: ResumeDecision,
+  signal?: AbortSignal,
 ): AsyncGenerator<ChatEvent> {
   const thread = await getThread(threadId);
   if (!thread || thread.userId !== userId) {
@@ -301,6 +348,7 @@ export async function* resumeChat(
   yield* runAgentStream(
     threadId,
     new Command({ resume: { decisions: [decision] } }),
+    signal,
   );
 }
 
@@ -322,7 +370,10 @@ export async function chatOnce(
 
   const result = await agent.invoke(
     { messages: [new HumanMessage(question)] },
-    { configurable: { thread_id: threadId } },
+    {
+      configurable: { thread_id: threadId },
+      signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
+    },
   );
   await touchThread(threadId);
 

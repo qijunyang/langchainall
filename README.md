@@ -140,6 +140,9 @@ API endpoints: `GET /api/conversations`, `POST /api/chat` (streams NDJSON
 | `CHAT_RETRY_MAX` | `2` | Model-call retries before falling back |
 | `CHAT_FALLBACK_MODEL` | `qwen2.5:3b` | Secondary model used if the primary keeps failing (pull it: `ollama pull qwen2.5:3b`) |
 | `CHAT_MODEL_CALL_LIMIT` | `5` | Max model calls per run (runaway guardrail) |
+| `CHAT_TURN_TIMEOUT_MS` | `120000` | Max wall-clock per turn before abort (also cancels the model) |
+| `DB_STATEMENT_TIMEOUT_MS` | `10000` | Cap a single Postgres query |
+| `DB_CONNECT_TIMEOUT_MS` | `5000` | Cap waiting to acquire a DB connection |
 | `CHAT_DEBUG` | _(unset)_ | Set to `1` for trim / RAG / lifecycle logs |
 
 ## Note on the local model
@@ -177,9 +180,9 @@ into a real product.
   - [x] **Model-level** (in `agent.ts`): `modelRetryMiddleware` (backoff + jitter),
         `modelFallbackMiddleware` (secondary model), `modelCallLimitMiddleware`
         guardrail; `toolRetryMiddleware` / `toolCallLimitMiddleware` for the MCP agent.
-  - [ ] **Timeouts & cancellation**: per-turn `AbortSignal` timeout into
-        `agent.stream/invoke`; pg `statement_timeout` + `connectionTimeoutMillis`;
-        Ollama request timeout.
+  - [x] **Timeouts & cancellation**: per-turn `AbortSignal` timeout enforced over
+        the stream (also cancels the model) + client-disconnect abort; pg
+        `statement_timeout` + `connectionTimeoutMillis`.
   - [ ] **API errors + health** (`server.ts`): classify errors → status/message
         (400/403/503/504/500); in-band error marker for mid-stream failures;
         `GET /api/health` (checks Ollama + Postgres).

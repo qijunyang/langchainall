@@ -22,40 +22,60 @@ import {
 } from "./chat/agent.js";
 import { ensureSchema, listThreads } from "./chat/store.js";
 
+// Max wall-clock per turn before the run is aborted (also cancels the model).
+const TURN_TIMEOUT_MS = Number(process.env.CHAT_TURN_TIMEOUT_MS ?? 120000);
+
 // Stream agent events to the client as newline-delimited JSON (NDJSON). Each
 // line is a ChatEvent ({type:"token"|"interrupt"}) plus a final {type:"done"}
-// (or {type:"error"} once streaming has started).
+// (or {type:"error"} once streaming has started). An AbortController cancels the
+// run on a per-turn timeout OR a client disconnect, and the signal is passed
+// into the agent (which cancels the underlying Ollama request).
 async function pipeEvents(
   res: Response,
   threadId: string,
-  events: AsyncGenerator<ChatEvent>,
+  makeEvents: (signal: AbortSignal) => AsyncGenerator<ChatEvent>,
 ): Promise<void> {
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
   res.setHeader("X-Thread-Id", threadId);
 
-  let aborted = false;
+  const ac = new AbortController();
+  let clientGone = false;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ac.abort();
+  }, TURN_TIMEOUT_MS);
   res.on("close", () => {
-    if (!res.writableFinished) aborted = true;
+    if (!res.writableFinished) {
+      clientGone = true;
+      ac.abort();
+    }
   });
 
   const write = (ev: object) => res.write(JSON.stringify(ev) + "\n");
 
   try {
-    for await (const ev of events) {
-      if (aborted) break;
+    for await (const ev of makeEvents(ac.signal)) {
       if (process.env.CHAT_DEBUG === "1") console.log("[api] event:", ev.type);
       write(ev);
     }
-    if (!aborted) write({ type: "done" });
+    write({ type: "done" });
     res.end();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    if (clientGone) return; // client already left — nothing to send
+    const msg = timedOut
+      ? "The request timed out — please try again."
+      : err instanceof Error
+        ? err.message
+        : String(err);
     if (!res.headersSent) {
-      res.status(403).json({ error: msg }); // authz/validation: before any write
+      res.status(timedOut ? 504 : 403).json({ error: msg }); // pre-stream error
     } else {
       write({ type: "error", value: msg });
       res.end();
     }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -85,7 +105,9 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     res.status(400).json({ error: "userId and message are required" });
     return;
   }
-  await pipeEvents(res, threadId, streamChat(userId, threadId, message));
+  await pipeEvents(res, threadId, (signal) =>
+    streamChat(userId, threadId, message, signal),
+  );
 });
 
 // Resume an interrupted run with a human decision (approve | reject).
@@ -104,7 +126,9 @@ app.post("/api/chat/resume", async (req: Request, res: Response) => {
     decisionType === "approve"
       ? { type: "approve" }
       : { type: "reject", message: "User declined." };
-  await pipeEvents(res, threadId, resumeChat(userId, threadId, decision));
+  await pipeEvents(res, threadId, (signal) =>
+    resumeChat(userId, threadId, decision, signal),
+  );
 });
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

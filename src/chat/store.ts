@@ -17,7 +17,14 @@ export const DATABASE_URL =
 
 // One shared pool for the whole process (created once — a heavy resource).
 // Exported so the RAG module (rag.ts) reuses the same pool.
-export const pool = new Pool({ connectionString: DATABASE_URL });
+// Timeouts so a slow/unreachable Postgres fails fast instead of hanging:
+//  - statement_timeout: cap a single query
+//  - connectionTimeoutMillis: cap waiting to acquire a connection
+export const pool = new Pool({
+  connectionString: DATABASE_URL,
+  statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 10000),
+  connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS ?? 5000),
+});
 
 export interface ChatThread {
   threadId: string;
