@@ -60,12 +60,22 @@ async function runChat(
   question: string,
 ): Promise<void> {
   let started = false;
-  for await (const token of streamChat(userId, threadId, question)) {
+  const header = () => {
     if (!started) {
       process.stdout.write(`\n[${userId} @ ${threadId}]\n> ${question}\n< `);
       started = true;
     }
-    process.stdout.write(token);
+  };
+  for await (const ev of streamChat(userId, threadId, question)) {
+    if (ev.type === "token") {
+      header();
+      process.stdout.write(ev.value);
+    } else if (ev.type === "interrupt") {
+      header();
+      process.stdout.write(
+        `\n⏸  ${ev.value.message}\n   (approval needed — use the web UI, or 'npm run hitl' for the resume demo)`,
+      );
+    }
   }
   if (started) process.stdout.write("\n");
 }

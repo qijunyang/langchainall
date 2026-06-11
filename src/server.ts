@@ -11,8 +11,50 @@
  */
 import { randomUUID } from "node:crypto";
 import express, { type Request, type Response, type NextFunction } from "express";
-import { streamChat } from "./chat/agent.js";
+import {
+  streamChat,
+  resumeChat,
+  type ChatEvent,
+  type ResumeDecision,
+} from "./chat/agent.js";
 import { ensureSchema, listThreads } from "./chat/store.js";
+
+// Stream agent events to the client as newline-delimited JSON (NDJSON). Each
+// line is a ChatEvent ({type:"token"|"interrupt"}) plus a final {type:"done"}
+// (or {type:"error"} once streaming has started).
+async function pipeEvents(
+  res: Response,
+  threadId: string,
+  events: AsyncGenerator<ChatEvent>,
+): Promise<void> {
+  res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+  res.setHeader("X-Thread-Id", threadId);
+
+  let aborted = false;
+  res.on("close", () => {
+    if (!res.writableFinished) aborted = true;
+  });
+
+  const write = (ev: object) => res.write(JSON.stringify(ev) + "\n");
+
+  try {
+    for await (const ev of events) {
+      if (aborted) break;
+      if (process.env.CHAT_DEBUG === "1") console.log("[api] event:", ev.type);
+      write(ev);
+    }
+    if (!aborted) write({ type: "done" });
+    res.end();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!res.headersSent) {
+      res.status(403).json({ error: msg }); // authz/validation: before any write
+    } else {
+      write({ type: "error", value: msg });
+      res.end();
+    }
+  }
+}
 
 const app = express();
 app.use(express.json());
@@ -28,7 +70,9 @@ app.get("/api/conversations", async (req: Request, res: Response) => {
   res.json(threads);
 });
 
-// Stream a chat turn. Tokens are written to the response as they arrive.
+// Stream a chat turn as NDJSON events. A new chat (no threadId) gets a minted
+// id returned in X-Thread-Id. The run may end with an `interrupt` event (the
+// agent is awaiting human approval) instead of `done`.
 app.post("/api/chat", async (req: Request, res: Response) => {
   const userId = String(req.body?.userId ?? "").trim();
   const message = String(req.body?.message ?? "").trim();
@@ -38,35 +82,26 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     res.status(400).json({ error: "userId and message are required" });
     return;
   }
+  await pipeEvents(res, threadId, streamChat(userId, threadId, message));
+});
 
-  // Tell the client which thread this is (esp. for a newly minted one).
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader("X-Thread-Id", threadId);
+// Resume an interrupted run with a human decision (approve | reject).
+app.post("/api/chat/resume", async (req: Request, res: Response) => {
+  const userId = String(req.body?.userId ?? "").trim();
+  const threadId = String(req.body?.threadId ?? "").trim();
+  const decisionType = String(req.body?.decision ?? "").trim();
 
-  // Stop streaming if the client disconnects (e.g. the Cancel button). Use the
-  // RESPONSE 'close' (fires on client disconnect) — not req 'close', which fires
-  // as soon as the request body is read and would abort us immediately.
-  let aborted = false;
-  res.on("close", () => {
-    if (!res.writableFinished) aborted = true;
-  });
-
-  try {
-    for await (const token of streamChat(userId, threadId, message)) {
-      if (aborted) break;
-      if (process.env.CHAT_DEBUG === "1") console.log("[api] token:", token);
-      res.write(token);
-    }
-    res.end();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Authorization / validation errors happen before any token is written.
-    if (!res.headersSent) {
-      res.status(403).json({ error: msg });
-    } else {
-      res.end();
-    }
+  if (!userId || !threadId || (decisionType !== "approve" && decisionType !== "reject")) {
+    res.status(400).json({
+      error: "userId, threadId and decision (approve|reject) are required",
+    });
+    return;
   }
+  const decision: ResumeDecision =
+    decisionType === "approve"
+      ? { type: "approve" }
+      : { type: "reject", message: "User declined." };
+  await pipeEvents(res, threadId, resumeChat(userId, threadId, decision));
 });
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

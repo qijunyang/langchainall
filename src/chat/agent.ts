@@ -3,6 +3,7 @@
  * checkpointer. Used by both the CLI (05-chat.ts) and the HTTP API (server.ts).
  */
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
+import { Command } from "@langchain/langgraph";
 import {
   createAgent,
   createMiddleware,
@@ -21,7 +22,12 @@ import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { createModel } from "../config.js";
 import { retrieveOfficeInfo } from "./rag.js";
-import { DATABASE_URL, authorizeOrCreate, touchThread } from "./store.js";
+import {
+  DATABASE_URL,
+  authorizeOrCreate,
+  getThread,
+  touchThread,
+} from "./store.js";
 
 // Keep only the last N messages in the PROMPT (full history still persists in
 // the checkpointer) — bounds context-window/latency/cost as a thread grows.
@@ -206,31 +212,96 @@ export async function buildChatAgent() {
   });
 }
 
+/** Events emitted while streaming a chat turn. */
+export type ChatEvent =
+  | { type: "token"; value: string }
+  | { type: "interrupt"; value: { id: string; message: string } };
+
+/** Human-in-the-loop decision used to resume an interrupted run. */
+export interface ResumeDecision {
+  type: "approve" | "reject";
+  message?: string;
+}
+
+type ChatAgent = Awaited<ReturnType<typeof buildChatAgent>>;
+
+/** Read any pending human-in-the-loop interrupt off the checkpointed state. */
+async function getPendingInterrupt(
+  agent: ChatAgent,
+  config: { configurable: { thread_id: string } },
+): Promise<{ id: string; message: string } | null> {
+  const state = (await agent.getState(config)) as {
+    tasks?: ReadonlyArray<{
+      interrupts?: ReadonlyArray<{ id?: string; value?: unknown }>;
+    }>;
+  };
+  for (const task of state.tasks ?? []) {
+    for (const intr of task.interrupts ?? []) {
+      const value = intr.value as
+        | { actionRequests?: Array<{ description?: string }> }
+        | undefined;
+      const message =
+        value?.actionRequests?.[0]?.description ?? "Approval required";
+      return { id: intr.id ?? "", message };
+    }
+  }
+  return null;
+}
+
+/** Run the agent (a fresh turn or a resume), yielding token + interrupt events. */
+async function* runAgentStream(
+  threadId: string,
+  input: Parameters<ChatAgent["stream"]>[0],
+): AsyncGenerator<ChatEvent> {
+  const agent = await buildChatAgent();
+  const config = { configurable: { thread_id: threadId } };
+
+  const stream = await agent.stream(input, {
+    ...config,
+    streamMode: "messages",
+  });
+  for await (const part of stream) {
+    const chunk = Array.isArray(part) ? part[0] : part;
+    if (AIMessageChunk.isInstance(chunk) && typeof chunk.content === "string" && chunk.content) {
+      yield { type: "token", value: chunk.content };
+    }
+  }
+
+  // After the stream, the run may be paused awaiting human approval.
+  const interrupt = await getPendingInterrupt(agent, config);
+  if (interrupt) yield { type: "interrupt", value: interrupt };
+
+  await touchThread(threadId);
+}
+
 /**
- * Authorize the (user, thread), run the agent, and stream the assistant's reply
- * token by token. Yields text chunks. Throws if the thread isn't the user's.
+ * Authorize the (user, thread) and stream the assistant's reply as events.
+ * The run may end with an `interrupt` event (awaiting approval) instead of a
+ * normal completion. Throws if the thread isn't the user's.
  */
 export async function* streamChat(
   userId: string,
   threadId: string,
   question: string,
-): AsyncGenerator<string> {
+): AsyncGenerator<ChatEvent> {
   await authorizeOrCreate(threadId, userId, question.slice(0, 60));
-  const agent = await buildChatAgent();
+  yield* runAgentStream(threadId, { messages: [new HumanMessage(question)] });
+}
 
-  const stream = await agent.stream(
-    { messages: [new HumanMessage(question)] },
-    { configurable: { thread_id: threadId }, streamMode: "messages" },
-  );
-
-  for await (const part of stream) {
-    const chunk = Array.isArray(part) ? part[0] : part;
-    if (AIMessageChunk.isInstance(chunk) && typeof chunk.content === "string" && chunk.content) {
-      yield chunk.content;
-    }
+/** Resume an interrupted run with an approve/reject decision; streams events. */
+export async function* resumeChat(
+  userId: string,
+  threadId: string,
+  decision: ResumeDecision,
+): AsyncGenerator<ChatEvent> {
+  const thread = await getThread(threadId);
+  if (!thread || thread.userId !== userId) {
+    throw new Error(`Thread "${threadId}" not found for user "${userId}".`);
   }
-
-  await touchThread(threadId);
+  yield* runAgentStream(
+    threadId,
+    new Command({ resume: { decisions: [decision] } }),
+  );
 }
 
 /**
