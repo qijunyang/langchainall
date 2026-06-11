@@ -14,7 +14,7 @@
     "rag:ingest": "tsx src/06-rag-ingest.ts",
     "ollama:up": "docker compose --profile dev up -d",
     "ollama:down": "docker compose --profile dev down",
-    "setup:model": "docker compose exec ollama ollama pull llama3.1"
+    "setup:model": "docker compose exec ollama ollama pull qwen2.5"
   },
   "engines": {
     "node": ">=20"

@@ -30,7 +30,7 @@ npm install
 npm run ollama:up
 
 # 3. Pull the model (a few GB, first run only). Must support tool-calling.
-npm run setup:model        # pulls llama3.1
+npm run setup:model        # pulls qwen2.5
 
 # 4. (optional) configure overrides
 cp .env.example .env
@@ -110,7 +110,7 @@ npx tsx src/05-chat.ts --user u1 "A brand new conversation"
 | Env var | Default | Meaning |
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `llama3.1` | Model name (must support tool-calling for Phases 3–4) |
+| `OLLAMA_MODEL` | `qwen2.5` | Model name (must support tool-calling for Phases 3–4) |
 | `DEMO_MCP_URL` | `http://localhost:3001/mcp` | URL of the custom MCP server (Phase 4 client) |
 | `MCP_SERVER_PORT` | `3001` | Port the custom MCP server listens on |
 | `MCP_DEBUG` | _(unset)_ | Set to `1` to log JSON-RPC traffic in the MCP server |
@@ -118,15 +118,22 @@ npx tsx src/05-chat.ts --user u1 "A brand new conversation"
 
 ## Note on the local model
 
-`llama3.1` runs on **CPU** here, so agent runs (multiple model passes) can be
-slow, and it occasionally fumbles tool-calling on conversational input. If you
-want crisper, faster agent behavior, pull a stronger tool-caller and point the
-model at it:
+The default is **`qwen2.5`** — it follows instructions and tool-calls reliably.
+It runs on **CPU** here, so agent runs (multiple model passes) can be slow, but
+the answers are sound.
 
-```bash
-docker compose exec ollama ollama pull qwen2.5
-#   then set OLLAMA_MODEL=qwen2.5 in .env
+Memory: since it's CPU-only, models load into **system RAM**. RAG keeps two
+models resident at once (the chat model + `nomic-embed-text` for embeddings),
+~5–6 GB total. To bound this, you can unload idle models faster via the
+`ollama` service env in `docker-compose.yml`:
+
+```yaml
+environment:
+  OLLAMA_KEEP_ALIVE: "1m"          # unload after 1 min idle (default 5m)
+  OLLAMA_MAX_LOADED_MODELS: "2"    # chat + embeddings
 ```
+
+If RAM is tight, use a smaller variant such as `qwen2.5:3b` (~2 GB).
 
 ## Learning roadmap (what to build next)
 

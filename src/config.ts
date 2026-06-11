@@ -6,7 +6,7 @@ export const OLLAMA_BASE_URL =
   process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
 /** Model name. Must support tool-calling for the agent demos (Phases 3-4). */
-export const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "llama3.1";
+export const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5";
 
 /**
  * Create a ChatOllama model pointed at the local server.
