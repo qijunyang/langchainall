@@ -13,7 +13,8 @@ multi-chat agent** backed by Postgres.
 | `src/02-chain.ts` | `npm run chain` | LCEL prompt chains, Zod structured output, a custom `RunnableLambda` tap |
 | `src/03-agent.ts` | `npm run agent` | A tool-calling agent (`createAgent`) with local tools (calculator, weather, welcome) |
 | `src/04-mcp-agent.ts` | `npm run mcp` | The same agent extended with **MCP tools** over **mixed transports** |
-| `src/05-chat.ts` | `npm run chat` | **Persistent multi-chat**: one stateless agent + a Postgres checkpointer keyed by `thread_id`, with per-user ownership (ChatGPT-style) |
+| `src/05-chat.ts` | `npm run chat` | **Persistent multi-chat**: one stateless agent + a Postgres checkpointer keyed by `thread_id`, per-user ownership; RAG-grounded, with model retry/fallback and human-in-the-loop approval |
+| `src/server.ts` + `web/` | `npm run api` + `npm run web` | **Web UI**: streaming React chat over an Express API — sidebar history, token streaming, and inline Yes/No approval for guarded tools |
 
 ## Prerequisites
 
@@ -92,6 +93,25 @@ npx tsx src/05-chat.ts --user u1 --list
 npx tsx src/05-chat.ts --user u1 "A brand new conversation"
 ```
 
+### Web UI
+
+A React/Vite chat app over an Express API that wraps the same agent. Two
+terminals (needs Ollama + Postgres up, and `npm run rag:ingest` once):
+
+```bash
+npm run api      # backend on :3100 (streams NDJSON events; CHAT_DEBUG on)
+npm run web      # frontend on :5173 -> open in the browser
+```
+
+It does **token streaming**, **RAG-grounded** answers, **persistent multi-chat**
+(sidebar + new conversation), and **human-in-the-loop**: ask *"show me my id"*
+and the agent pauses with an **Are you sure?** prompt and inline **Yes / No**
+buttons — Yes runs the guarded `get_user_id` tool, No declines. The interrupt is
+persisted by the checkpointer, so the resume targets the same `thread_id`.
+
+API endpoints: `GET /api/conversations`, `POST /api/chat` (streams NDJSON
+`token`/`interrupt`/`done` events), `POST /api/chat/resume` (`approve`/`reject`).
+
 ## How it fits together
 
 - **Everything is a Runnable** (`.invoke()`): a chain pipes Runnables in a fixed
@@ -111,6 +131,7 @@ npx tsx src/05-chat.ts --user u1 "A brand new conversation"
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen2.5` | Model name (must support tool-calling for Phases 3–4) |
+| `API_PORT` | `3100` | Port for the web-UI API (`src/server.ts`) |
 | `DEMO_MCP_URL` | `http://localhost:3001/mcp` | URL of the custom MCP server (Phase 4 client) |
 | `MCP_SERVER_PORT` | `3001` | Port the custom MCP server listens on |
 | `MCP_DEBUG` | _(unset)_ | Set to `1` to log JSON-RPC traffic in the MCP server |
@@ -181,8 +202,10 @@ into a real product.
 ### Tier 3 — agent depth
 - [ ] **Author a custom LangGraph** — your own nodes/branches/state (vs. the
       prebuilt `createAgent`).
-- [ ] **Human-in-the-loop** — approval/interrupt before an agent takes a real
-      action (`humanInTheLoopMiddleware`).
+- [x] **Human-in-the-loop** — approval/interrupt before an agent takes a real
+      action (`humanInTheLoopMiddleware`). Done: the `get_user_id` tool requires
+      Yes/No approval (interrupt → resume via the checkpointer), wired through the
+      API (`/api/chat/resume`) and UI.
 - [ ] **Multi-agent / orchestration** — supervisor + sub-agents for complex tasks.
 
 > Suggested path: **streaming → serve as API → simple chat UI**, which pulls in

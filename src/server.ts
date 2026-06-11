@@ -3,9 +3,12 @@
  *
  *   GET  /api/conversations?userId=...      -> list the user's chats (sidebar)
  *   POST /api/chat  { userId, threadId?, message }
- *        -> streams the assistant reply as plain-text tokens.
- *           For a new chat (no threadId) the server mints one and returns it in
- *           the `X-Thread-Id` response header.
+ *        -> streams the reply as NDJSON events (one JSON object per line):
+ *           {type:"token"} ... then {type:"interrupt"} | {type:"done"} |
+ *           {type:"error"}. A new chat (no threadId) gets a minted id in the
+ *           `X-Thread-Id` response header.
+ *   POST /api/chat/resume  { userId, threadId, decision: "approve" | "reject" }
+ *        -> resume a run paused for human approval; streams events the same way.
  *
  * Start: npm run api   (defaults to http://localhost:3100)
  */
