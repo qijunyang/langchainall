@@ -71,22 +71,25 @@ checkpointer** keyed by `thread_id`. Ownership/metadata (`userId`, title) live i
 a separate `chat_threads` table — the "app DB", distinct from the checkpointer.
 Each run is a separate process, so memory persists across runs.
 
+# NOTE: invoke tsx directly. `npm run chat -- --user ...` drops the flags under
+# PowerShell (npm's `--` forwarding is broken there), so pass args via tsx:
+
 ```bash
 # Start a chat (the thread is created and owned by the user on first use)
-npm run chat -- --user u1 --thread t1 "Hi, my name is Bob. Remember it."
-npm run chat -- --user u1 --thread t1 "What is my name?"   # → recalls "Bob"
+npx tsx src/05-chat.ts --user u1 --thread t1 "Hi, my name is Bob. Remember it."
+npx tsx src/05-chat.ts --user u1 --thread t1 "What is my name?"   # → recalls "Bob"
 
 # A different thread has its own separate history
-npm run chat -- --user u1 --thread t2 "What is my name?"   # → doesn't know
+npx tsx src/05-chat.ts --user u1 --thread t2 "What is my name?"   # → doesn't know
 
 # Authorization: another user cannot open someone else's thread
-npm run chat -- --user u2 --thread t1 "..."                # → rejected
+npx tsx src/05-chat.ts --user u2 --thread t1 "..."                # → rejected
 
 # List a user's chats ("choose a chat next time")
-npm run chat -- --user u1 --list
+npx tsx src/05-chat.ts --user u1 --list
 
 # Omit --thread to start a "New Chat" (a thread id is generated and printed)
-npm run chat -- --user u1 "A brand new conversation"
+npx tsx src/05-chat.ts --user u1 "A brand new conversation"
 ```
 
 ## How it fits together
@@ -124,3 +127,39 @@ model at it:
 docker compose exec ollama ollama pull qwen2.5
 #   then set OLLAMA_MODEL=qwen2.5 in .env
 ```
+
+## Learning roadmap (what to build next)
+
+Covered so far: models, prompts, LCEL/Runnables, structured output, agents +
+tools, MCP (incl. a custom server), middleware, persistence/checkpointers,
+context trimming, and RAG. What's left turns this from "works in a terminal"
+into a real product.
+
+### Tier 1 — to ship a real app
+- [ ] **Streaming** — `.stream()` / `.streamEvents()` for token-by-token output
+      and live tool steps (the ChatGPT typing UX).
+- [ ] **Serve it (API + frontend)** — wrap the agent in an HTTP/SSE endpoint and
+      a simple chat UI; ties chat + RAG + memory together for a real user.
+- [ ] **Error handling / resilience** — retries, timeouts, model fallbacks
+      (`modelRetryMiddleware`, `modelFallbackMiddleware`), graceful failures.
+- [ ] **Observability** — LangSmith tracing to see every step/token/tool.
+
+### Tier 2 — make it good *and* safe
+- [ ] **Evaluation / testing** — LLM-as-judge, eval sets, regression tests so you
+      *know* the RAG/agent is correct (not just eyeballing).
+- [ ] **Security: prompt injection** — with RAG + memory + tools, a malicious doc
+      or message can hijack the model. The #1 real-world LLM risk.
+- [ ] **Advanced RAG** — re-ranking, hybrid (keyword + vector) search, metadata
+      filtering, citations, query rewriting.
+- [ ] **Summarization memory** — long-thread memory beyond trimming (the
+      "forgot the early context" fix); `summarizationMiddleware`.
+
+### Tier 3 — agent depth
+- [ ] **Author a custom LangGraph** — your own nodes/branches/state (vs. the
+      prebuilt `createAgent`).
+- [ ] **Human-in-the-loop** — approval/interrupt before an agent takes a real
+      action (`humanInTheLoopMiddleware`).
+- [ ] **Multi-agent / orchestration** — supervisor + sub-agents for complex tasks.
+
+> Suggested path: **streaming → serve as API → simple chat UI**, which pulls in
+> several Tier-1 topics at once and produces a demoable product.
