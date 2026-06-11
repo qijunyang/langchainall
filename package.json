@@ -12,7 +12,7 @@
     "mcp:server": "tsx src/mcps/demo-server.ts",
     "chat": "tsx src/05-chat.ts",
     "rag:ingest": "tsx src/06-rag-ingest.ts",
-    "api": "CHAT_DEBUG='1' tsx src/server.ts",
+    "api": "cross-env CHAT_DEBUG=1 tsx src/server.ts",
     "web": "npm --prefix web run dev",
     "web:install": "npm --prefix web install",
     "ollama:up": "docker compose --profile dev up -d",
@@ -26,6 +26,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.2",
     "@types/pg": "^8.20.0",
+    "cross-env": "^10.1.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   },
