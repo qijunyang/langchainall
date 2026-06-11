@@ -1,0 +1,49 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    profiles:
+      - dev
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # If you have an NVIDIA GPU + nvidia-container-toolkit, uncomment to enable it:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # External state store for the chat demo (Phase 5): LangGraph checkpointer
+  # (message history) + our chat_threads metadata table both live here.
+  postgres:
+    image: postgres:16-alpine
+    container_name: langchainall-postgres
+    profiles:
+      - dev
+    environment:
+      POSTGRES_USER: langchain
+      POSTGRES_PASSWORD: langchain
+      POSTGRES_DB: langchain
+    ports:
+      # Host 5544 -> container 5432, to avoid clashing with any other local Postgres.
+      - "5544:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langchain -d langchain"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  ollama_data:
+    # Fixed name (not project-prefixed) so pulled models are shared/reused
+    # across every compose project that references this same volume name.
+    name: ollama_data
+  pg_data:
