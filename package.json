@@ -12,6 +12,9 @@
     "mcp:server": "tsx src/mcps/demo-server.ts",
     "chat": "tsx src/05-chat.ts",
     "rag:ingest": "tsx src/06-rag-ingest.ts",
+    "api": "tsx src/server.ts",
+    "web": "npm --prefix web run dev",
+    "web:install": "npm --prefix web install",
     "ollama:up": "docker compose --profile dev up -d",
     "ollama:down": "docker compose --profile dev down",
     "setup:model": "docker compose exec ollama ollama pull qwen2.5"

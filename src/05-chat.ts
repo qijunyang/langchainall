@@ -2,103 +2,20 @@
  * Phase 5 — Persistent multi-chat (Option C): one stateless agent + an external
  * checkpointer keyed by thread_id, with per-user ownership. ChatGPT-style.
  *
- * Each run is a SEPARATE process, so history MUST live in a durable store
- * (Postgres here) — that's the whole point: memory survives across runs.
+ * The agent itself lives in ./chat/agent.ts (shared with the HTTP server).
+ * This file is just the CLI front-end; it streams the reply token by token.
  *
  * Usage (invoke tsx directly — `npm run chat -- --user ...` drops the flags
  * under PowerShell, where npm's `--` forwarding is broken):
  *   npx tsx src/05-chat.ts --user u1 --thread t1 "Hi, my name is Bob"
  *   npx tsx src/05-chat.ts --user u1 --thread t1 "What's my name?"   # recalls "Bob"
- *   npx tsx src/05-chat.ts --user u1 --thread t2 "What's my name?"   # different chat: doesn't know
- *   npx tsx src/05-chat.ts --user u2 --thread t1 "..."               # rejected: not u2's thread
  *   npx tsx src/05-chat.ts --user u1 --list                          # list u1's chats
  *   npx tsx src/05-chat.ts --user u1 "New chat without a thread id"  # mints a thread id
  */
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
-import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
-import { createAgent, createMiddleware } from "langchain";
-import {
-  HumanMessage,
-  SystemMessage,
-  isHumanMessage,
-  trimMessages,
-} from "@langchain/core/messages";
-import { createModel } from "./config.js";
-import { retrieveOfficeInfo } from "./chat/rag.js";
-import {
-  DATABASE_URL,
-  ensureSchema,
-  authorizeOrCreate,
-  touchThread,
-  listThreads,
-  closeStore,
-} from "./chat/store.js";
-
-// How many recent messages to keep in the PROMPT (sliding window). The full
-// history still persists in the checkpointer — this only bounds what the model
-// sees each turn, so context-window/latency/cost stay flat as a thread grows.
-const CHAT_MAX_MESSAGES = Number(process.env.CHAT_MAX_MESSAGES ?? 10);
-
-// Middleware: trim history right before each model call. wrapModelCall sees the
-// rehydrated messages and we shrink them to the last N — without touching what
-// gets stored back to the checkpointer.
-const trimHistory = createMiddleware({
-  name: "TrimHistory",
-  wrapModelCall: async (request, handler) => {
-    const trimmed = await trimMessages(request.messages, {
-      strategy: "last",
-      maxTokens: CHAT_MAX_MESSAGES, // "tokens" counted as messages, see below
-      tokenCounter: (msgs) => msgs.length,
-      startOn: "human", // keep the window starting on a human turn
-      includeSystem: true,
-    });
-    if (process.env.CHAT_DEBUG === "1") {
-      console.error(
-        `[trim] ${request.messages.length} -> ${trimmed.length} messages sent to model`,
-      );
-    }
-    return handler({ ...request, messages: trimmed });
-  },
-});
-
-// Middleware: RAG. Before each model call, retrieve the office-info chunks most
-// relevant to the user's latest question and inject them as a SystemMessage —
-// grounding the answer. Like trimming, this only shapes the model REQUEST; the
-// retrieved context is never written back to the checkpointer.
-const ragContext = createMiddleware({
-  name: "OfficeRag",
-  wrapModelCall: async (request, handler) => {
-    const lastHuman = [...request.messages].reverse().find(isHumanMessage);
-    const query =
-      typeof lastHuman?.content === "string" ? lastHuman.content : "";
-
-    if (query) {
-      try {
-        const chunks = await retrieveOfficeInfo(query, 3);
-        if (chunks.length > 0) {
-          const context = new SystemMessage(
-            "You are the assistant for Acme Consulting. Answer the user's " +
-              "question using ONLY the office information below. If it does not " +
-              "contain the answer, say you don't have that information.\n\n" +
-              chunks.join("\n\n"),
-          );
-          if (process.env.CHAT_DEBUG === "1") {
-            console.error(`[rag] injected ${chunks.length} chunk(s) for: "${query}"`);
-          }
-          return handler({ ...request, messages: [context, ...request.messages] });
-        }
-      } catch (err) {
-        // If retrieval fails (e.g. office_docs not ingested), chat still works.
-        console.error(
-          "[rag] retrieval skipped:",
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }
-    return handler(request);
-  },
-});
+import { streamChat } from "./chat/agent.js";
+import { ensureSchema, listThreads, closeStore } from "./chat/store.js";
 
 function parseCli(): {
   user: string;
@@ -142,39 +59,15 @@ async function runChat(
   threadId: string,
   question: string,
 ): Promise<void> {
-  // Authorize (or create the thread on first use). Title = first message.
-  await authorizeOrCreate(threadId, userId, question.slice(0, 60));
-
-  // The checkpointer is the external, durable state store keyed by thread_id.
-  const checkpointer = PostgresSaver.fromConnString(DATABASE_URL);
-  await checkpointer.setup(); // idempotent: creates checkpoint tables if needed
-
-  // One stateless agent; state lives in the checkpointer, selected per-invoke.
-  // No tools here: this is a pure conversational agent, so the model focuses on
-  // chatting instead of being tempted to emit tool calls on small talk.
-  const agent = createAgent({
-    model: createModel(),
-    tools: [],
-    checkpointer,
-    middleware: [ragContext, trimHistory],
-  });
-
-  // NOTE (single-shot CLI): no per-thread lock needed — one process = one
-  // invoke. In a server you'd serialize concurrent runs on the SAME thread_id
-  // (in-process mutex for one node; a DISTRIBUTED lock when multi-instance).
-
-  // Pass ONLY the new message; the checkpointer rehydrates prior history.
-  const result = await agent.invoke(
-    { messages: [new HumanMessage(question)] },
-    { configurable: { thread_id: threadId } },
-  );
-
-  await touchThread(threadId);
-
-  const last = result.messages[result.messages.length - 1];
-  console.log(`\n[${userId} @ ${threadId}]`);
-  console.log(`> ${question}`);
-  console.log(`< ${typeof last.content === "string" ? last.content : JSON.stringify(last.content)}`);
+  let started = false;
+  for await (const token of streamChat(userId, threadId, question)) {
+    if (!started) {
+      process.stdout.write(`\n[${userId} @ ${threadId}]\n> ${question}\n< `);
+      started = true;
+    }
+    process.stdout.write(token);
+  }
+  if (started) process.stdout.write("\n");
 }
 
 async function main(): Promise<void> {
