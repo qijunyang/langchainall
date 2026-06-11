@@ -9,6 +9,7 @@ import {
   modelRetryMiddleware,
   modelFallbackMiddleware,
   modelCallLimitMiddleware,
+  humanInTheLoopMiddleware,
 } from "langchain";
 import {
   AIMessageChunk,
@@ -16,6 +17,8 @@ import {
   SystemMessage,
   trimMessages,
 } from "@langchain/core/messages";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
 import { createModel } from "../config.js";
 import { retrieveOfficeInfo } from "./rag.js";
 import { DATABASE_URL, authorizeOrCreate, touchThread } from "./store.js";
@@ -138,6 +141,26 @@ const lifecycleLogger = createMiddleware({
   },
 });
 
+// A local tool that returns the user's ID (a random string for the demo).
+// It's guarded by human-in-the-loop below, so the agent must get approval
+// before it actually runs.
+const getUserId = tool(
+  () => `usr_${Math.random().toString(36).slice(2, 10)}`,
+  {
+    name: "get_user_id",
+    description: "Return the current user's ID. Use when the user asks for their ID.",
+    schema: z.object({}),
+  },
+);
+
+// Human-in-the-loop: pause and ask for approval before running get_user_id.
+const APPROVAL = "Are you sure you want to list your ID?";
+const humanApproval = humanInTheLoopMiddleware({
+  interruptOn: {
+    get_user_id: { allowedDecisions: ["approve", "reject"], description: APPROVAL },
+  },
+});
+
 // One checkpointer for the whole process (created + migrated once, then reused).
 let checkpointerPromise: Promise<PostgresSaver> | null = null;
 function getCheckpointer(): Promise<PostgresSaver> {
@@ -156,7 +179,7 @@ export async function buildChatAgent() {
   const checkpointer = await getCheckpointer();
   return createAgent({
     model: createModel(),
-    tools: [],
+    tools: [getUserId],
     checkpointer,
     // Order matters (outer → inner). Resilience wraps the model call last:
     //   modelCallLimit guards against runaway calls; modelFallback wraps
@@ -168,6 +191,7 @@ export async function buildChatAgent() {
       lifecycleLogger,
       ragContext,
       trimHistory,
+      humanApproval,
       modelCallLimitMiddleware({ runLimit: MODEL_CALLS_PER_RUN }),
       modelFallbackMiddleware(createModel({ model: FALLBACK_MODEL })),
       modelRetryMiddleware({
