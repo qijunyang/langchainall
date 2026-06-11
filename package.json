@@ -12,7 +12,6 @@
     "mcp:server": "tsx src/mcps/demo-server.ts",
     "chat": "tsx src/05-chat.ts",
     "rag:ingest": "tsx src/06-rag-ingest.ts",
-    "hitl": "tsx src/07-hitl.ts",
     "api": "cross-env CHAT_DEBUG=1 tsx src/server.ts",
     "web": "npm --prefix web run dev",
     "web:install": "npm --prefix web install",
