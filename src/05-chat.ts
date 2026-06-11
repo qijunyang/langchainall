@@ -5,20 +5,27 @@
  * Each run is a SEPARATE process, so history MUST live in a durable store
  * (Postgres here) — that's the whole point: memory survives across runs.
  *
- * Usage:
- *   npm run chat -- --user u1 --thread t1 "Hi, my name is Bob"
- *   npm run chat -- --user u1 --thread t1 "What's my name?"   # recalls "Bob"
- *   npm run chat -- --user u1 --thread t2 "What's my name?"   # different chat: doesn't know
- *   npm run chat -- --user u2 --thread t1 "..."               # rejected: not u2's thread
- *   npm run chat -- --user u1 --list                          # list u1's chats
- *   npm run chat -- --user u1 "New chat without a thread id"  # mints a thread id
+ * Usage (invoke tsx directly — `npm run chat -- --user ...` drops the flags
+ * under PowerShell, where npm's `--` forwarding is broken):
+ *   npx tsx src/05-chat.ts --user u1 --thread t1 "Hi, my name is Bob"
+ *   npx tsx src/05-chat.ts --user u1 --thread t1 "What's my name?"   # recalls "Bob"
+ *   npx tsx src/05-chat.ts --user u1 --thread t2 "What's my name?"   # different chat: doesn't know
+ *   npx tsx src/05-chat.ts --user u2 --thread t1 "..."               # rejected: not u2's thread
+ *   npx tsx src/05-chat.ts --user u1 --list                          # list u1's chats
+ *   npx tsx src/05-chat.ts --user u1 "New chat without a thread id"  # mints a thread id
  */
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { createAgent, createMiddleware } from "langchain";
-import { HumanMessage, trimMessages } from "@langchain/core/messages";
+import {
+  HumanMessage,
+  SystemMessage,
+  isHumanMessage,
+  trimMessages,
+} from "@langchain/core/messages";
 import { createModel } from "./config.js";
+import { retrieveOfficeInfo } from "./chat/rag.js";
 import {
   DATABASE_URL,
   ensureSchema,
@@ -52,6 +59,44 @@ const trimHistory = createMiddleware({
       );
     }
     return handler({ ...request, messages: trimmed });
+  },
+});
+
+// Middleware: RAG. Before each model call, retrieve the office-info chunks most
+// relevant to the user's latest question and inject them as a SystemMessage —
+// grounding the answer. Like trimming, this only shapes the model REQUEST; the
+// retrieved context is never written back to the checkpointer.
+const ragContext = createMiddleware({
+  name: "OfficeRag",
+  wrapModelCall: async (request, handler) => {
+    const lastHuman = [...request.messages].reverse().find(isHumanMessage);
+    const query =
+      typeof lastHuman?.content === "string" ? lastHuman.content : "";
+
+    if (query) {
+      try {
+        const chunks = await retrieveOfficeInfo(query, 3);
+        if (chunks.length > 0) {
+          const context = new SystemMessage(
+            "You are the assistant for Acme Consulting. Answer the user's " +
+              "question using ONLY the office information below. If it does not " +
+              "contain the answer, say you don't have that information.\n\n" +
+              chunks.join("\n\n"),
+          );
+          if (process.env.CHAT_DEBUG === "1") {
+            console.error(`[rag] injected ${chunks.length} chunk(s) for: "${query}"`);
+          }
+          return handler({ ...request, messages: [context, ...request.messages] });
+        }
+      } catch (err) {
+        // If retrieval fails (e.g. office_docs not ingested), chat still works.
+        console.error(
+          "[rag] retrieval skipped:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    return handler(request);
   },
 });
 
@@ -111,7 +156,7 @@ async function runChat(
     model: createModel(),
     tools: [],
     checkpointer,
-    middleware: [trimHistory],
+    middleware: [ragContext, trimHistory],
   });
 
   // NOTE (single-shot CLI): no per-thread lock needed — one process = one
