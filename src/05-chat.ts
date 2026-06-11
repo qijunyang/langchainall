@@ -16,8 +16,8 @@
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
-import { createAgent } from "langchain";
-import { HumanMessage } from "@langchain/core/messages";
+import { createAgent, createMiddleware } from "langchain";
+import { HumanMessage, trimMessages } from "@langchain/core/messages";
 import { createModel } from "./config.js";
 import {
   DATABASE_URL,
@@ -27,6 +27,33 @@ import {
   listThreads,
   closeStore,
 } from "./chat/store.js";
+
+// How many recent messages to keep in the PROMPT (sliding window). The full
+// history still persists in the checkpointer — this only bounds what the model
+// sees each turn, so context-window/latency/cost stay flat as a thread grows.
+const CHAT_MAX_MESSAGES = Number(process.env.CHAT_MAX_MESSAGES ?? 10);
+
+// Middleware: trim history right before each model call. wrapModelCall sees the
+// rehydrated messages and we shrink them to the last N — without touching what
+// gets stored back to the checkpointer.
+const trimHistory = createMiddleware({
+  name: "TrimHistory",
+  wrapModelCall: async (request, handler) => {
+    const trimmed = await trimMessages(request.messages, {
+      strategy: "last",
+      maxTokens: CHAT_MAX_MESSAGES, // "tokens" counted as messages, see below
+      tokenCounter: (msgs) => msgs.length,
+      startOn: "human", // keep the window starting on a human turn
+      includeSystem: true,
+    });
+    if (process.env.CHAT_DEBUG === "1") {
+      console.error(
+        `[trim] ${request.messages.length} -> ${trimmed.length} messages sent to model`,
+      );
+    }
+    return handler({ ...request, messages: trimmed });
+  },
+});
 
 function parseCli(): {
   user: string;
@@ -84,6 +111,7 @@ async function runChat(
     model: createModel(),
     tools: [],
     checkpointer,
+    middleware: [trimHistory],
   });
 
   // NOTE (single-shot CLI): no per-thread lock needed — one process = one
