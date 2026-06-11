@@ -60,7 +60,7 @@ function createServer(): McpServer {
 }
 
 // Set MCP_DEBUG=1 to print the JSON-RPC traffic to the console (stderr).
-const DEBUG = true; //process.env.MCP_DEBUG === "1";
+const DEBUG = process.env.MCP_DEBUG === "1";
 const logRpc = (dir: "in" | "out", msg: unknown): void => {
   if (DEBUG) console.error(`[MCP ${dir === "in" ? "←in " : "out→"}]`, JSON.stringify(msg));
 };

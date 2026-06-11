@@ -54,6 +54,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
   try {
     for await (const token of streamChat(userId, threadId, message)) {
       if (aborted) break;
+      if (process.env.CHAT_DEBUG === "1") console.log("[api] token:", token);
       res.write(token);
     }
     res.end();

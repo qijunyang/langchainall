@@ -5,12 +5,10 @@
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { createAgent, createMiddleware } from "langchain";
 import {
+  AIMessageChunk,
   HumanMessage,
   SystemMessage,
-  isAIMessageChunk,
-  isHumanMessage,
   trimMessages,
-  type BaseMessageChunk,
 } from "@langchain/core/messages";
 import { createModel } from "../config.js";
 import { retrieveOfficeInfo } from "./rag.js";
@@ -45,7 +43,9 @@ const trimHistory = createMiddleware({
 const ragContext = createMiddleware({
   name: "OfficeRag",
   wrapModelCall: async (request, handler) => {
-    const lastHuman = [...request.messages].reverse().find(isHumanMessage);
+    const lastHuman = [...request.messages]
+      .reverse()
+      .find((m) => HumanMessage.isInstance(m));
     const query =
       typeof lastHuman?.content === "string" ? lastHuman.content : "";
     if (query) {
@@ -74,6 +74,59 @@ const ragContext = createMiddleware({
   },
 });
 
+/** Concise view of the agent state — the main thing these hooks read/modify. */
+function describeState(state: unknown): string {
+  const s = state as {
+    messages?: Array<{ getType?: () => string; content?: unknown }>;
+  };
+  const msgs = s.messages ?? [];
+  const last = msgs[msgs.length - 1];
+  const lastStr = last
+    ? `${last.getType?.() ?? "?"}: ${JSON.stringify(last.content ?? "").slice(0, 50)}`
+    : "(none)";
+  return `messages=${msgs.length}, last=[${lastStr}], stateKeys=[${Object.keys(
+    s as object,
+  ).join(", ")}]`;
+}
+
+// Demo middleware: prints each lifecycle hook with ITS PARAMETERS so you can see
+// what's available to read/modify.
+//
+// Every hook has the SAME signature: (state, runtime) => stateUpdate | void
+//   - state   : the agent state — has `messages` (+ any custom channels). This
+//               is the INPUT you read, and what you can change.
+//   - runtime : context / store / config for the run (rarely modified here).
+//   RETURN a Partial state update (e.g. `{ messages: [...] }`) to MODIFY state,
+//   or return nothing (undefined) to leave it unchanged. (To change the model's
+//   request/response specifically, use wrapModelCall instead of these.)
+const LIFECYCLE_DEBUG = process.env.CHAT_DEBUG === "1";
+
+const lifecycleLogger = createMiddleware({
+  name: "LifecycleLogger",
+  beforeAgent: (state, runtime) => {
+    if (!LIFECYCLE_DEBUG) return undefined;
+    console.log("[mw] beforeAgent IN :", describeState(state));
+    console.log("[mw] beforeAgent runtimeKeys:", Object.keys(runtime ?? {}));
+    return undefined; // e.g. `return { messages: [...] }` to prepend a system msg
+  },
+  beforeModel: (state) => {
+    if (!LIFECYCLE_DEBUG) return undefined;
+    console.log("[mw]   beforeModel IN :", describeState(state));
+    return undefined;
+  },
+  afterModel: (state) => {
+    if (!LIFECYCLE_DEBUG) return undefined;
+    // The model's reply is now the LAST message in state — this is the OUTPUT.
+    console.log("[mw]   afterModel OUT:", describeState(state));
+    return undefined; // e.g. inspect/validate/redact the reply, return an update
+  },
+  afterAgent: (state) => {
+    if (!LIFECYCLE_DEBUG) return undefined;
+    console.log("[mw] afterAgent OUT:", describeState(state));
+    return undefined;
+  },
+});
+
 // One checkpointer for the whole process (created + migrated once, then reused).
 let checkpointerPromise: Promise<PostgresSaver> | null = null;
 function getCheckpointer(): Promise<PostgresSaver> {
@@ -94,7 +147,8 @@ export async function buildChatAgent() {
     model: createModel(),
     tools: [],
     checkpointer,
-    middleware: [ragContext, trimHistory],
+    // lifecycleLogger is a learning aid — its hooks only log when CHAT_DEBUG=1.
+    middleware: [lifecycleLogger, ragContext, trimHistory],
   });
 }
 
@@ -116,11 +170,37 @@ export async function* streamChat(
   );
 
   for await (const part of stream) {
-    const chunk = (Array.isArray(part) ? part[0] : part) as BaseMessageChunk;
-    if (isAIMessageChunk(chunk) && typeof chunk.content === "string" && chunk.content) {
+    const chunk = Array.isArray(part) ? part[0] : part;
+    if (AIMessageChunk.isInstance(chunk) && typeof chunk.content === "string" && chunk.content) {
       yield chunk.content;
     }
   }
 
   await touchThread(threadId);
+}
+
+/**
+ * Non-streaming counterpart of streamChat — provided for comparison.
+ *
+ * Same authz / agent / middleware / checkpointer, but uses agent.invoke():
+ * it runs the turn to completion and returns the FULL reply as one string,
+ * instead of yielding tokens as they are produced. invoke() resolves once with
+ * the whole graph state (result.messages); stream() emits chunks along the way.
+ */
+export async function chatOnce(
+  userId: string,
+  threadId: string,
+  question: string,
+): Promise<string> {
+  await authorizeOrCreate(threadId, userId, question.slice(0, 60));
+  const agent = await buildChatAgent();
+
+  const result = await agent.invoke(
+    { messages: [new HumanMessage(question)] },
+    { configurable: { thread_id: threadId } },
+  );
+  await touchThread(threadId);
+
+  const content = result.messages.at(-1)?.content;
+  return typeof content === "string" ? content : JSON.stringify(content);
 }

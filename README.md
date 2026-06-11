@@ -143,12 +143,24 @@ context trimming, and RAG. What's left turns this from "works in a terminal"
 into a real product.
 
 ### Tier 1 — to ship a real app
-- [ ] **Streaming** — `.stream()` / `.streamEvents()` for token-by-token output
-      and live tool steps (the ChatGPT typing UX).
-- [ ] **Serve it (API + frontend)** — wrap the agent in an HTTP/SSE endpoint and
-      a simple chat UI; ties chat + RAG + memory together for a real user.
-- [ ] **Error handling / resilience** — retries, timeouts, model fallbacks
-      (`modelRetryMiddleware`, `modelFallbackMiddleware`), graceful failures.
+- [x] **Streaming** — `.stream()` token-by-token output (web UI + CLI).
+- [x] **Serve it (API + frontend)** — Express API (`src/server.ts`) + React/Vite
+      app (`web/`); ties chat + RAG + memory together for a real user.
+- [ ] **Error handling / resilience** — retries, timeouts, fallbacks, graceful
+      failures. Sub-tasks:
+  - [ ] **Model-level** (in `agent.ts`): `modelRetryMiddleware` (backoff + jitter),
+        `modelFallbackMiddleware` (secondary model), `modelCallLimitMiddleware`
+        guardrail; `toolRetryMiddleware` / `toolCallLimitMiddleware` for the MCP agent.
+  - [ ] **Timeouts & cancellation**: per-turn `AbortSignal` timeout into
+        `agent.stream/invoke`; pg `statement_timeout` + `connectionTimeoutMillis`;
+        Ollama request timeout.
+  - [ ] **API errors + health** (`server.ts`): classify errors → status/message
+        (400/403/503/504/500); in-band error marker for mid-stream failures;
+        `GET /api/health` (checks Ollama + Postgres).
+  - [ ] **Frontend resilience** (`web/`): typed error display, **Retry** button
+        (resend last message), handle dropped stream, optional health indicator.
+  - [ ] **Startup / dependency**: retry `checkpointer.setup()` / `ensureSchema()`
+        with backoff before serving (Postgres may still be booting).
 - [ ] **Observability** — LangSmith tracing to see every step/token/tool.
 
 ### Tier 2 — make it good *and* safe
