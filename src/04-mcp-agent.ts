@@ -8,7 +8,11 @@
  * Requires: Node + npx available (the MCP server is launched as a subprocess).
  */
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
-import { createAgent } from "langchain";
+import {
+  createAgent,
+  toolRetryMiddleware,
+  toolCallLimitMiddleware,
+} from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import { createModel } from "./config.js";
 import { localTools } from "./tools/index.js";
@@ -46,6 +50,12 @@ async function main(): Promise<void> {
     const agent = createAgent({
       model: createModel(),
       tools: [...localTools, ...mcpTools],
+      // Tool-level resilience: retry a flaky/failing tool a couple times, and
+      // cap total tool calls per run so a misbehaving loop can't run away.
+      middleware: [
+        toolRetryMiddleware({ maxRetries: 2, initialDelayMs: 300, jitter: true }),
+        toolCallLimitMiddleware({ runLimit: 10 }),
+      ],
     });
 
     const result = await agent.invoke({

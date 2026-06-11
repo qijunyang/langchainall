@@ -115,6 +115,11 @@ npx tsx src/05-chat.ts --user u1 "A brand new conversation"
 | `MCP_SERVER_PORT` | `3001` | Port the custom MCP server listens on |
 | `MCP_DEBUG` | _(unset)_ | Set to `1` to log JSON-RPC traffic in the MCP server |
 | `DATABASE_URL` | `postgresql://langchain:langchain@localhost:5544/langchain` | Postgres for the Phase 5 checkpointer + metadata |
+| `CHAT_MAX_MESSAGES` | `10` | Sliding-window size sent to the model (trim middleware) |
+| `CHAT_RETRY_MAX` | `2` | Model-call retries before falling back |
+| `CHAT_FALLBACK_MODEL` | `qwen2.5:3b` | Secondary model used if the primary keeps failing (pull it: `ollama pull qwen2.5:3b`) |
+| `CHAT_MODEL_CALL_LIMIT` | `5` | Max model calls per run (runaway guardrail) |
+| `CHAT_DEBUG` | _(unset)_ | Set to `1` for trim / RAG / lifecycle logs |
 
 ## Note on the local model
 
@@ -148,7 +153,7 @@ into a real product.
       app (`web/`); ties chat + RAG + memory together for a real user.
 - [ ] **Error handling / resilience** — retries, timeouts, fallbacks, graceful
       failures. Sub-tasks:
-  - [ ] **Model-level** (in `agent.ts`): `modelRetryMiddleware` (backoff + jitter),
+  - [x] **Model-level** (in `agent.ts`): `modelRetryMiddleware` (backoff + jitter),
         `modelFallbackMiddleware` (secondary model), `modelCallLimitMiddleware`
         guardrail; `toolRetryMiddleware` / `toolCallLimitMiddleware` for the MCP agent.
   - [ ] **Timeouts & cancellation**: per-turn `AbortSignal` timeout into

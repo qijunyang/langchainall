@@ -3,7 +3,13 @@
  * checkpointer. Used by both the CLI (05-chat.ts) and the HTTP API (server.ts).
  */
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
-import { createAgent, createMiddleware } from "langchain";
+import {
+  createAgent,
+  createMiddleware,
+  modelRetryMiddleware,
+  modelFallbackMiddleware,
+  modelCallLimitMiddleware,
+} from "langchain";
 import {
   AIMessageChunk,
   HumanMessage,
@@ -17,6 +23,11 @@ import { DATABASE_URL, authorizeOrCreate, touchThread } from "./store.js";
 // Keep only the last N messages in the PROMPT (full history still persists in
 // the checkpointer) — bounds context-window/latency/cost as a thread grows.
 const CHAT_MAX_MESSAGES = Number(process.env.CHAT_MAX_MESSAGES ?? 10);
+
+// Resilience config (Phase 1 — model-level error handling).
+const RETRY_MAX = Number(process.env.CHAT_RETRY_MAX ?? 2);
+const FALLBACK_MODEL = process.env.CHAT_FALLBACK_MODEL ?? "qwen2.5:3b";
+const MODEL_CALLS_PER_RUN = Number(process.env.CHAT_MODEL_CALL_LIMIT ?? 5);
 
 // Trim history right before each model call (only the request, not stored state).
 const trimHistory = createMiddleware({
@@ -147,8 +158,27 @@ export async function buildChatAgent() {
     model: createModel(),
     tools: [],
     checkpointer,
+    // Order matters (outer → inner). Resilience wraps the model call last:
+    //   modelCallLimit guards against runaway calls; modelFallback wraps
+    //   modelRetry, so each model is retried, then we fall back to a secondary.
+    //   retry uses onFailure:"error" so it THROWS on exhaustion — that's what
+    //   lets the fallback middleware catch it and switch models.
     // lifecycleLogger is a learning aid — its hooks only log when CHAT_DEBUG=1.
-    middleware: [lifecycleLogger, ragContext, trimHistory],
+    middleware: [
+      lifecycleLogger,
+      ragContext,
+      trimHistory,
+      modelCallLimitMiddleware({ runLimit: MODEL_CALLS_PER_RUN }),
+      modelFallbackMiddleware(createModel({ model: FALLBACK_MODEL })),
+      modelRetryMiddleware({
+        maxRetries: RETRY_MAX,
+        initialDelayMs: 500,
+        backoffFactor: 2,
+        maxDelayMs: 4000,
+        jitter: true,
+        onFailure: "error",
+      }),
+    ],
   });
 }
 
