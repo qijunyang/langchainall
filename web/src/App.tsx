@@ -186,18 +186,13 @@ export function App() {
         <header className="topbar">
           {threadId ? `Conversation ${threadId.slice(0, 8)}…` : "New conversation"}
         </header>
-        <MessageList messages={messages} streaming={streaming} />
-        {pendingApproval && (
-          <div className="approval-bar">
-            <span>Approve listing your ID?</span>
-            <button className="btn send" onClick={() => resolve("approve")}>
-              Yes
-            </button>
-            <button className="btn cancel" onClick={() => resolve("reject")}>
-              No
-            </button>
-          </div>
-        )}
+        <MessageList
+          messages={messages}
+          streaming={streaming}
+          pendingApproval={pendingApproval}
+          onApprove={() => resolve("approve")}
+          onReject={() => resolve("reject")}
+        />
         <MessageInput
           streaming={streaming}
           disabled={pendingApproval}

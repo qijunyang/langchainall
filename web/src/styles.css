@@ -237,18 +237,12 @@ body {
   color: #fff;
 }
 
-/* ---- human-in-the-loop approval ---- */
-.approval-bar {
+/* ---- human-in-the-loop approval (inline, under the agent's question) ---- */
+.approval-actions {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  background: #fff8e1;
-  font-size: 14px;
+  gap: 8px;
 }
-.approval-bar span {
-  flex: 1;
-  font-weight: 600;
-  color: #8a6d00;
+.approval-actions .btn {
+  padding: 6px 18px;
+  font-size: 14px;
 }
