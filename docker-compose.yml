@@ -18,10 +18,11 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
-  # External state store for the chat demo (Phase 5): LangGraph checkpointer
-  # (message history) + our chat_threads metadata table both live here.
+  # External state store: LangGraph checkpointer (message history) + our
+  # chat_threads metadata + the pgvector store for RAG (Phase 6) all live here.
+  # pgvector/pgvector:pg16 = Postgres 16 with the `vector` extension built in.
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: langchainall-postgres
     profiles:
       - dev

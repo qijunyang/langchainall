@@ -11,6 +11,7 @@
     "mcp": "tsx src/04-mcp-agent.ts",
     "mcp:server": "tsx src/mcps/demo-server.ts",
     "chat": "tsx src/05-chat.ts",
+    "rag:ingest": "tsx src/06-rag-ingest.ts",
     "ollama:up": "docker compose --profile dev up -d",
     "ollama:down": "docker compose --profile dev down",
     "setup:model": "docker compose exec ollama ollama pull llama3.1"

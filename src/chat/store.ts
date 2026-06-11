@@ -16,7 +16,8 @@ export const DATABASE_URL =
   "postgresql://langchain:langchain@localhost:5544/langchain";
 
 // One shared pool for the whole process (created once — a heavy resource).
-const pool = new Pool({ connectionString: DATABASE_URL });
+// Exported so the RAG module (rag.ts) reuses the same pool.
+export const pool = new Pool({ connectionString: DATABASE_URL });
 
 export interface ChatThread {
   threadId: string;
